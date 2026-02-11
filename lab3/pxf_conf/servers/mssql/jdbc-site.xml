@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <property>
+        <name>jdbc.driver</name>
+        <value>com.microsoft.sqlserver.jdbc.SQLServerDriver</value>
+    </property>
+    <property>
+        <name>jdbc.url</name>
+        <value>jdbc:sqlserver://mssql:1433;databaseName=TourDeFrance;encrypt=false;trustServerCertificate=true;</value>
+    </property>
+    <property>
+        <name>jdbc.user</name>
+        <value>sa</value>
+    </property>
+    <property>
+        <name>jdbc.password</name>
+        <value>Password1</value>
+    </property>
+</configuration>

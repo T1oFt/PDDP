@@ -1,0 +1,83 @@
+services:
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: mssql
+    environment:
+      ACCEPT_EULA: Y
+      MSSQL_SA_PASSWORD: Password1 
+    ports:
+      - "1433:1433"
+    volumes:
+      - mssql_data:/var/opt/mssql
+    networks:
+      - greenplum
+    
+  master:
+    image: woblerr/greenplum:6.27.1-v0.6
+    container_name: master
+    hostname: master
+    environment:
+      - GREENPLUM_DEPLOYMENT=master
+      - GREENPLUM_GPPERFMON_ENABLE=true
+      - GREENPLUM_DISKQUOTA_ENABLE=true
+      - GREENPLUM_PXF_ENABLE=true
+      - GREENPLUM_PASSWORD=Password1
+      - GREENPLUM_GPMON_PASSWORD=Password1
+    ports:
+      - "5432:5432"
+    volumes:
+      - gpdb-master-data:/data
+      - ./conf/gpinitsystem_config_no_mirrors:/tmp/gpinitsystem_config
+      - ./conf/hostfile_gpinitsystem:/tmp/hostfile_gpinitsystem
+      - ./conf/ssh/id_rsa:/home/gpadmin/.ssh/id_rsa
+      - ./conf/ssh/id_rsa.pub:/home/gpadmin/.ssh/id_rsa.pub
+      - ./pxf_conf/lib:/data/pxf/lib
+      - ./pxf_conf/servers/mssql:/data/pxf/servers/mssql
+    depends_on:
+      - segment1
+      - segment2
+    networks:
+      - greenplum
+
+  segment1:
+    image: woblerr/greenplum:6.27.1-v0.6
+    container_name: segment1
+    hostname: segment1
+    command: /start_gpdb.sh "00:primary" "01:primary"
+    environment:
+      - GREENPLUM_DEPLOYMENT=segment
+    volumes:
+      - gpdb-segment1-data:/data
+      - ./conf/ssh/authorized_keys:/tmp/authorized_keys
+      - ./pxf_conf/lib:/data/pxf/lib
+      - ./pxf_conf/servers/mssql:/data/pxf/servers/mssql
+    stop_grace_period: 60s
+    networks:
+      - greenplum
+
+  segment2:
+    image: woblerr/greenplum:6.27.1-v0.6
+    container_name: segment2
+    hostname: segment2
+    command: /start_gpdb.sh "00:primary" "01:primary"
+    environment:
+      - GREENPLUM_DEPLOYMENT=segment
+    volumes:
+      - gpdb-segment2-data:/data
+      - ./conf/ssh/authorized_keys:/tmp/authorized_keys
+      - ./pxf_conf/lib:/data/pxf/lib
+      - ./pxf_conf/servers/mssql:/data/pxf/servers/mssql
+    stop_grace_period: 60s
+    networks:
+      - greenplum
+
+
+networks:
+  greenplum:
+
+
+volumes:
+  mssql_data:
+  gpdb-master-data:
+  gpdb-segment1-data:
+  gpdb-segment2-data:
