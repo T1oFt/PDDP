@@ -27,15 +27,19 @@ services:
       - "5432:5432"
     volumes:
       - gpdb-master-data:/data
-      - ./conf/gpinitsystem_config_no_mirrors:/tmp/gpinitsystem_config
+      - ./conf/gpinitsystem_config:/tmp/gpinitsystem_config
       - ./conf/hostfile_gpinitsystem:/tmp/hostfile_gpinitsystem
       - ./conf/ssh/id_rsa:/home/gpadmin/.ssh/id_rsa
       - ./conf/ssh/id_rsa.pub:/home/gpadmin/.ssh/id_rsa.pub
       - ./pxf_conf/lib:/data/pxf/lib
       - ./pxf_conf/servers/mssql:/data/pxf/servers/mssql
     depends_on:
-      - segment1
-      - segment2
+      segment1:
+        condition: service_started
+      segment2:
+        condition: service_started
+      gpfdist-server:
+        condition: service_healthy
     networks:
       - greenplum
 
@@ -43,7 +47,7 @@ services:
     image: woblerr/greenplum:6.27.1-v0.6
     container_name: segment1
     hostname: segment1
-    command: /start_gpdb.sh "00:primary" "01:primary"
+    command: /start_gpdb.sh "00:primary" "01:mirror"
     environment:
       - GREENPLUM_DEPLOYMENT=segment
     volumes:
@@ -59,7 +63,7 @@ services:
     image: woblerr/greenplum:6.27.1-v0.6
     container_name: segment2
     hostname: segment2
-    command: /start_gpdb.sh "00:primary" "01:primary"
+    command: /start_gpdb.sh "00:primary" "01:mirror"
     environment:
       - GREENPLUM_DEPLOYMENT=segment
     volumes:
@@ -71,6 +75,25 @@ services:
     networks:
       - greenplum
 
+  gpfdist-server:
+    build:
+      dockerfile: Dockerfile.gpfdist
+    container_name: gpfdist-server
+    hostname: gpfdist-server
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./external_data:/data/external
+      - gpfdist-logs:/data/logs
+    networks:
+      - greenplum
+    healthcheck:
+      test: ["CMD", "test", "-f", "/usr/local/bin/gpfdist"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
 
 networks:
   greenplum:
@@ -81,3 +104,4 @@ volumes:
   gpdb-master-data:
   gpdb-segment1-data:
   gpdb-segment2-data:
+  gpfdist-logs:

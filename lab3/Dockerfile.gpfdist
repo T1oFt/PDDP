@@ -1,0 +1,19 @@
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    libbz2-1.0 \
+    libssl3 \
+    libzstd1 \
+    zlib1g \
+    libevent-2.1-7 \
+    libyaml-0-2 \
+    libapr1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=woblerr/greenplum:6.27.1-v0.6 /usr/local/greenplum-db/bin/gpfdist /usr/local/bin/gpfdist
+
+RUN mkdir -p /data
+
+EXPOSE 8080
+
+CMD ["gpfdist", "-d", "/data", "-p", "8080", "-l", "/data/gpfdist.log"]
