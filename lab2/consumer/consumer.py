@@ -77,48 +77,57 @@ schema = StructType([
     StructField("user_engagement_score", DoubleType(), True),
 ])
 
-def is_active_user(daily_active_minutes, sessions_per_day, followers_count):
+# === UDF: Wellness Score ===
+def calculate_wellness(bmi, stress, sleep):
     """
-    Возвращает True, если пользователь активен:
-    - Daily active minutes > 60 OR
-    - Sessions per day > 5 OR
-    - Followers count > 1000
+    Рассчитывает интегральный показатель благополучия.
+    Возвращает: (wellness_score: 0-100, risk_category: str)
     """
-    if daily_active_minutes is None or sessions_per_day is None:
-        return False
+    if None in (bmi, stress, sleep):
+        return None, "Unknown"
     
-    f_count = followers_count if followers_count is not None else 0
-
-    if (daily_active_minutes > 60 or 
-        sessions_per_day > 5 or 
-        f_count > 1000):
-        return True
-    return False
-
-is_active_user_udf = udf(is_active_user, BooleanType())
-
-def categorize_engagement(daily_active_minutes, sessions_per_day, followers_count, engagement_score):
-    if daily_active_minutes is None or sessions_per_day is None:
-        return "Unknown"
+    # Компоненты (чем ближе к оптимуму — тем выше скор)
+    bmi_score = max(0, 10 - abs(bmi - 22))           # оптимум BMI ~22
+    stress_score = max(0, 10 - stress / 4)           # меньше стресс = лучше
+    sleep_score = max(0, 10 - abs(sleep - 7.5) * 2)  # оптимум сна ~7.5ч
     
-    f_count = followers_count if followers_count is not None else 0
-    e_score = engagement_score if engagement_score is not None else 0
-
-    if (daily_active_minutes > 200 or sessions_per_day > 10 or f_count > 5000 or e_score > 7):
-        return "Super User"
-    elif (daily_active_minutes > 100 or sessions_per_day > 5 or e_score > 5):
-        return "Active User"
-    elif daily_active_minutes > 30 or sessions_per_day > 3:
-        return "Moderate User"
+    wellness = (bmi_score + stress_score + sleep_score) / 3 * 10
+    wellness = round(min(100, max(0, wellness)), 2)
+    
+    if wellness >= 70:
+        category = "High Wellness"
+    elif wellness >= 40:
+        category = "Medium Wellness"
     else:
-        return "Casual User"
+        category = "Low Wellness"
+    
+    return wellness, category
 
-categorize_engagement_udf = udf(categorize_engagement, StringType())
+wellness_udf = udf(
+    calculate_wellness, 
+    StructType([
+        StructField("wellness_score", DoubleType(), True),
+        StructField("risk_category", StringType(), True)
+    ])
+)
+
+# === Схема агрегированных данных (для Postgres) ===
+aggregated_schema = StructType([
+    StructField("country", StringType(), True),
+    StructField("risk_category", StringType(), True),
+    StructField("avg_daily_active_minutes", DoubleType(), True),
+    StructField("avg_engagement_score", DoubleType(), True),
+    StructField("avg_wellness_score", DoubleType(), True),
+    StructField("user_count", IntegerType(), True),
+    StructField("avg_bmi", DoubleType(), True),
+    StructField("avg_stress_score", DoubleType(), True),
+    StructField("processed_at", StringType(), True),
+])
+
 
 def create_spark_session():
     spark = SparkSession.builder \
         .appName("InstagramAggregationPipeline") \
-        .config("spark.sql.streaming.forceDeleteTempCheckpointLocation", "true") \
         .getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
     return spark
@@ -137,49 +146,43 @@ def parse_messages(df):
         .select("data.*") \
         .withColumn("processed_at", current_timestamp())
 
-def aggregate_active_users(df):
-    """
-    Основная логика:
-    1. Применяем UDF фильтрации.
-    2. Фильтруем DataFrame.
-    3. Добавляем Watermark.
-    4. Агрегируем по country и content_type_preference.
-    """
 
-    df_with_flag = df.withColumn(
-        "is_active", 
-        is_active_user_udf(
-            col("daily_active_minutes_instagram"),
-            col("sessions_per_day"),
-            col("followers_count")
+def filter_and_enrich(df):
+    """Фильтрация + применение UDF"""
+    # Фильтр: только пользователи с высоким стрессом
+    filtered = df.filter(col("perceived_stress_score") > 10)
+    
+    # Применяем UDF
+    with_wellness = filtered.withColumn(
+        "wellness_data",
+        wellness_udf(
+            col("body_mass_index"), 
+            col("perceived_stress_score"), 
+            col("sleep_hours_per_night")
         )
+    ).select(
+        "*",
+        col("wellness_data.wellness_score").alias("wellness_score"),
+        col("wellness_data.risk_category").alias("risk_category")
     )
-    
-    df_filtered = df_with_flag.filter(col("is_active") == True)
-    
-    print("[Pipeline] Users filtered by activity UDF.")
+    return with_wellness
 
-    df_with_watermark = df_filtered.withWatermark("processed_at", "10 minutes")
 
-    result_df = df_with_watermark.groupBy(
-        col("country"),
-        col("content_type_preference")
-    ).agg(
-        count("user_id").alias("active_user_count"),
+def aggregate_data(df):
+    """Агрегация по стране и категории риска"""
+    return df.groupBy("country", "risk_category").agg(
         avg("daily_active_minutes_instagram").alias("avg_daily_active_minutes"),
         avg("user_engagement_score").alias("avg_engagement_score"),
-        sum("followers_count").alias("total_followers"),
-        avg("time_on_reels_per_day").alias("avg_reels_time"),
-        avg("posts_created_per_week").alias("avg_posts_per_week"),
+        avg("wellness_score").alias("avg_wellness_score"),
+        count("user_id").alias("user_count"),
+        avg("body_mass_index").alias("avg_bmi"),
+        avg("perceived_stress_score").alias("avg_stress_score")
+    ).withColumn(
+        "processed_at", 
+        current_timestamp().cast("string")
     )
-    
-    return result_df
 
-def write_final_to_postgres(spark, df_stream, table_name):
-    """
-    df_stream: Потоковый DataFrame (для получения схемы и запуска стрима)
-    table_name: Имя таблицы в PostgreSQL
-    """
+def write_to_postgres(spark, df_stream, table_name):
     jdbc_url = f"jdbc:postgresql://{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
     properties = {
         "user": POSTGRES_USER,
@@ -187,38 +190,29 @@ def write_final_to_postgres(spark, df_stream, table_name):
         "driver": "org.postgresql.Driver"
     }
 
-    print(f"[Sink] Creating table '{table_name}' if not exists...")
-    
-    schema = df_stream.schema
-    
-    empty_static_df = spark.createDataFrame([], schema)
-
+    # Инициализация таблицы (если не существует)
+    empty_df = spark.createDataFrame([], aggregated_schema)
     try:
-        empty_static_df.write \
-            .jdbc(url=jdbc_url, table=table_name, mode="ignore", properties=properties)
-        print(f"[Sink] Table '{table_name}' ready (created or already exists).")
+        empty_df.write.jdbc(url=jdbc_url, table=table_name, mode="ignore", properties=properties)
+        print(f"[Sink] Table '{table_name}' ready")
     except Exception as e:
-        print(f"[Sink] Warning: Could not create table automatically: {e}")
-        print("[Sink] Please ensure the table exists in PostgreSQL manually.")
+        print(f"[Sink] Warning: {e}")
 
     def write_batch(batch_df, batch_id):
-        batch_count = batch_df.count()
-        if batch_count > 0:
-            print(f"[Sink] Writing batch {batch_id} with {batch_count} aggregated rows")
-            batch_df.write \
-                .jdbc(url=jdbc_url, table=table_name, mode="append", properties=properties)
-            print(f"[Sink] Batch {batch_id} written successfully")
+        cnt = batch_df.count()
+        if cnt > 0:
+            print(f"[Sink] Batch {batch_id}: writing {cnt} rows")
+            batch_df.write.jdbc(url=jdbc_url, table=table_name, mode="append", properties=properties)
         else:
-            print(f"[Sink] Batch {batch_id} is empty, skipping")
+            print(f"[Sink] Batch {batch_id}: empty")
 
-    query = df_stream.writeStream \
+    return df_stream.writeStream \
         .foreachBatch(write_batch) \
         .outputMode("update") \
-        .trigger(processingTime="15 seconds") \
-        .queryName("FinalAggregationStream") \
+        .trigger(processingTime="10 seconds") \
+        .queryName("AggregationSink") \
         .start()
-    
-    return query
+
 
 def main():
     print("=" * 60)
@@ -228,20 +222,16 @@ def main():
     spark = create_spark_session()
     
     # 1. Чтение
-    kafka_df = read_from_kafka(spark)
-    parsed_df = parse_messages(kafka_df)
-    
-    print("\n--- Schema before filtering ---")
-    parsed_df.printSchema()
-
-    # 2. Логика: Фильтрация + Агрегация
-    final_df = aggregate_active_users(parsed_df)
+    df = read_from_kafka(spark)
+    df = parse_messages(df)
+    df = filter_and_enrich(df)
+    df = aggregate_data(df)
     
     print("\n--- Schema after aggregation ---")
-    final_df.printSchema()
+    df.printSchema()
 
     # 3. Запись в одну итоговую таблицу
-    query = write_final_to_postgres(spark, final_df, POSTGRES_FINAL_TABLE)
+    query = write_to_postgres(spark, df, POSTGRES_FINAL_TABLE)
     
     print("=" * 60)
     print(f"Streaming started. Writing to table: {POSTGRES_FINAL_TABLE}")

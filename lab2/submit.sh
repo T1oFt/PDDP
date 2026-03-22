@@ -1,5 +1,3 @@
-#!/bin/bash
-
 set -e
 
 echo "=============================================="
@@ -18,7 +16,5 @@ spark-submit \
   --deploy-mode client \
   --conf spark.driver.host=spark-driver \
   --conf spark.driver.bindAddress=0.0.0.0 \
-  --conf spark.executor.memory=1g \
-  --conf spark.driver.memory=1g \
   --name InstagramKafkaConsumer \
   /app/consumer.py
