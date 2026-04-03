@@ -4,14 +4,11 @@ USER root
 
 WORKDIR /app
 
-# Устанавливаем зависимости
 COPY consumer/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копируем consumer код
 COPY consumer/consumer.py .
 
-# Скрипт запуска spark-submit
 COPY submit.sh .
 RUN chmod +x submit.sh
 

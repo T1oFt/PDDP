@@ -4,7 +4,6 @@ from pyspark.sql.functions import from_json, col, current_timestamp, avg, count,
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType, BooleanType
 from pyspark.sql.functions import udf
 
-# --- Конфигурация ---
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "broker:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "instagram-users")
 
@@ -13,10 +12,8 @@ POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
 POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "postgres")
 POSTGRES_DB = os.getenv("POSTGRES_DB", "postgres")
-# Итоговая таблица, куда попадут агрегированные данные активных пользователей
 POSTGRES_FINAL_TABLE = os.getenv("POSTGRES_TABLE_FINAL", "instagram_active_users_aggregated")
 
-# --- Схема данных ---
 schema = StructType([
     StructField("user_id", IntegerType(), False),
     StructField("age", IntegerType(), True),
@@ -45,7 +42,7 @@ schema = StructType([
     StructField("books_read_per_year", DoubleType(), True),
     StructField("volunteer_hours_per_month", DoubleType(), True),
     StructField("travel_frequency_per_year", DoubleType(), True),
-    StructField("daily_active_minutes_instagram", IntegerType(), True),
+    StructField("daily_active_minutes_instagram", DoubleType(), True),
     StructField("sessions_per_day", IntegerType(), True),
     StructField("posts_created_per_week", IntegerType(), True),
     StructField("reels_watched_per_day", IntegerType(), True),
@@ -77,7 +74,6 @@ schema = StructType([
     StructField("user_engagement_score", DoubleType(), True),
 ])
 
-# === UDF: Wellness Score ===
 def calculate_wellness(bmi, stress, sleep):
     """
     Рассчитывает интегральный показатель благополучия.
@@ -86,10 +82,9 @@ def calculate_wellness(bmi, stress, sleep):
     if None in (bmi, stress, sleep):
         return None, "Unknown"
     
-    # Компоненты (чем ближе к оптимуму — тем выше скор)
-    bmi_score = max(0, 10 - abs(bmi - 22))           # оптимум BMI ~22
-    stress_score = max(0, 10 - stress / 4)           # меньше стресс = лучше
-    sleep_score = max(0, 10 - abs(sleep - 7.5) * 2)  # оптимум сна ~7.5ч
+    bmi_score = max(0, 10 - abs(bmi - 22))
+    stress_score = max(0, 10 - stress / 4)
+    sleep_score = max(0, 10 - abs(sleep - 7.5) * 2)
     
     wellness = (bmi_score + stress_score + sleep_score) / 3 * 10
     wellness = round(min(100, max(0, wellness)), 2)
@@ -111,7 +106,6 @@ wellness_udf = udf(
     ])
 )
 
-# === Схема агрегированных данных (для Postgres) ===
 aggregated_schema = StructType([
     StructField("country", StringType(), True),
     StructField("risk_category", StringType(), True),
@@ -149,10 +143,8 @@ def parse_messages(df):
 
 def filter_and_enrich(df):
     """Фильтрация + применение UDF"""
-    # Фильтр: только пользователи с высоким стрессом
     filtered = df.filter(col("perceived_stress_score") > 10)
-    
-    # Применяем UDF
+
     with_wellness = filtered.withColumn(
         "wellness_data",
         wellness_udf(
@@ -190,7 +182,6 @@ def write_to_postgres(spark, df_stream, table_name):
         "driver": "org.postgresql.Driver"
     }
 
-    # Инициализация таблицы (если не существует)
     empty_df = spark.createDataFrame([], aggregated_schema)
     try:
         empty_df.write.jdbc(url=jdbc_url, table=table_name, mode="ignore", properties=properties)
@@ -199,17 +190,17 @@ def write_to_postgres(spark, df_stream, table_name):
         print(f"[Sink] Warning: {e}")
 
     def write_batch(batch_df, batch_id):
-        cnt = batch_df.count()
-        if cnt > 0:
-            print(f"[Sink] Batch {batch_id}: writing {cnt} rows")
-            batch_df.write.jdbc(url=jdbc_url, table=table_name, mode="append", properties=properties)
-        else:
-            print(f"[Sink] Batch {batch_id}: empty")
+        # cnt = batch_df.count()
+        # if cnt > 0:
+        #     print(f"[Sink] Batch {batch_id}: writing {cnt} rows")
+        batch_df.write.jdbc(url=jdbc_url, table=table_name, mode="append", properties=properties)
+        # else:
+        #     print(f"[Sink] Batch {batch_id}: empty")
 
     return df_stream.writeStream \
         .foreachBatch(write_batch) \
         .outputMode("update") \
-        .trigger(processingTime="10 seconds") \
+        .trigger(processingTime="15 seconds") \
         .queryName("AggregationSink") \
         .start()
 
@@ -220,8 +211,7 @@ def main():
     print("=" * 60)
     
     spark = create_spark_session()
-    
-    # 1. Чтение
+
     df = read_from_kafka(spark)
     df = parse_messages(df)
     df = filter_and_enrich(df)
@@ -230,7 +220,6 @@ def main():
     print("\n--- Schema after aggregation ---")
     df.printSchema()
 
-    # 3. Запись в одну итоговую таблицу
     query = write_to_postgres(spark, df, POSTGRES_FINAL_TABLE)
     
     print("=" * 60)
