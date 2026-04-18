@@ -11,7 +11,7 @@ echo "Submitting Spark job to cluster..."
 echo "=============================================="
 
 spark-submit \
-  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.postgresql:postgresql:42.7.3 \
+  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.0,org.postgresql:postgresql:42.7.3 \
   --master spark://spark-master:7077 \
   --deploy-mode client \
   --conf spark.driver.host=spark-driver \

@@ -66,6 +66,6 @@ try:
         
         print(f"Cycle {cycle_count} completed, restarting...")
 except Exception as e:
-    print(f"\n✗ Unexpected error: {e}")
+    print(f"\nUnexpected error: {e}")
     producer.close()
     exit(1)

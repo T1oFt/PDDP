@@ -1,11 +1,12 @@
 import os
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import from_json, col, current_timestamp, avg, count, sum, expr
+from pyspark.sql.functions import from_json, to_json, col, current_timestamp, avg, count, sum, expr, struct
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType, BooleanType
 from pyspark.sql.functions import udf
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "broker:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "instagram-users")
+KAFKA_NULL_USER_TOPIC = os.getenv("KAFKA_NULL_USER_TOPIC", "null-user-id")
 
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "postgres")
 POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
@@ -15,7 +16,7 @@ POSTGRES_DB = os.getenv("POSTGRES_DB", "postgres")
 POSTGRES_FINAL_TABLE = os.getenv("POSTGRES_TABLE_FINAL", "instagram_active_users_aggregated")
 
 schema = StructType([
-    StructField("user_id", IntegerType(), False),
+    StructField("user_id", DoubleType(), False),
     StructField("age", IntegerType(), True),
     StructField("gender", StringType(), True),
     StructField("country", StringType(), True),
@@ -67,10 +68,6 @@ schema = StructType([
     StructField("content_type_preference", StringType(), True),
     StructField("preferred_content_theme", StringType(), True),
     StructField("privacy_setting_level", StringType(), True),
-    StructField("two_factor_auth_enabled", StringType(), True),
-    StructField("biometric_login_used", StringType(), True),
-    StructField("linked_accounts_count", IntegerType(), True),
-    StructField("subscription_status", StringType(), True),
     StructField("user_engagement_score", DoubleType(), True),
 ])
 
@@ -123,6 +120,7 @@ def create_spark_session():
     spark = SparkSession.builder \
         .appName("InstagramAggregationPipeline") \
         .getOrCreate()
+        # .conf.set("spark.sql.jsonGenerator.ignoreNullFields", False)
     spark.sparkContext.setLogLevel("WARN")
     return spark
 
@@ -190,18 +188,19 @@ def write_to_postgres(spark, df_stream, table_name):
         print(f"[Sink] Warning: {e}")
 
     def write_batch(batch_df, batch_id):
-        # cnt = batch_df.count()
-        # if cnt > 0:
-        #     print(f"[Sink] Batch {batch_id}: writing {cnt} rows")
-        batch_df.write.jdbc(url=jdbc_url, table=table_name, mode="append", properties=properties)
-        # else:
-        #     print(f"[Sink] Batch {batch_id}: empty")
+        cnt = batch_df.count()
+        if cnt > 0:
+            print(f"[Sink] Batch {batch_id}: writing {cnt} rows")
+            batch_df.write.jdbc(url=jdbc_url, table=table_name, mode="append", properties=properties)
+        else:
+            print(f"[Sink] Batch {batch_id}: empty")
 
     return df_stream.writeStream \
         .foreachBatch(write_batch) \
         .outputMode("update") \
         .trigger(processingTime="15 seconds") \
         .queryName("AggregationSink") \
+        .option("checkpointLocation", "/tmp/checkpoints/aggregation") \
         .start()
 
 
@@ -214,11 +213,34 @@ def main():
 
     df = read_from_kafka(spark)
     df = parse_messages(df)
+
+    df_debug = parse_messages(read_from_kafka(spark))
+    df_debug.select("user_id", "age", "country").writeStream \
+    .format("console") \
+    .option("numRows", 10) \
+    .outputMode("append") \
+    .option("truncate", False) \
+    .start()
+    df_null = df.filter(col("user_id").isNull())
+    # df_null = df_null.withColumn("user_id", lit(5.0))
+    df_null.select(
+        col("user_id").cast("string").alias("key"),
+        to_json(struct([col(c) for c in df_null.columns]), {"ignoreNullFields": "false"}).alias("value")
+    ) \
+    .writeStream \
+    .format("kafka") \
+    .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS) \
+    .option("topic", KAFKA_NULL_USER_TOPIC) \
+    .option("checkpointLocation", "/tmp/checkpoints/null-users") \
+    .outputMode("append") \
+    .start()
+    df = df.filter(col("user_id").isNotNull())
     df = filter_and_enrich(df)
     df = aggregate_data(df)
     
     print("\n--- Schema after aggregation ---")
-    df.printSchema()
+    # df.printSchema()
+    df_null.printSchema()
 
     query = write_to_postgres(spark, df, POSTGRES_FINAL_TABLE)
     
