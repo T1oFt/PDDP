@@ -1,0 +1,115 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres-db
+    environment:
+      POSTGRES_DB: analytics_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init/postgres:/docker-entrypoint-initdb.d
+      - ./model4_university/postgres:/seed/postgres:ro
+    networks:
+      - analytics-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mongodb:
+    image: mongo:7
+    container_name: mongodb
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: admin
+      MONGO_INITDB_DATABASE: analytics_db
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+      - ./init/mongodb:/docker-entrypoint-initdb.d
+      - ./model4_university/mongodb:/seed/mongodb:ro
+    networks:
+      - analytics-network
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --username admin --password admin --authenticationDatabase admin --quiet --eval 'db.adminCommand({ ping: 1 })'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio-storage
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - analytics-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    volumes:
+      - ./model4_university/minio:/seed/minio:ro
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set myminio http://minio:9000 minioadmin minioadmin;
+      /usr/bin/mc mb --ignore-existing myminio/analytics-bucket;
+      /usr/bin/mc anonymous set download myminio/analytics-bucket;
+      /usr/bin/mc cp /seed/minio/submission_files_manifest.csv myminio/analytics-bucket/submission_files_manifest.csv;
+      exit 0;
+      "
+    networks:
+      - analytics-network
+
+  trino:
+    image: trinodb/trino:445
+    container_name: trino-query-engine
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./trino/config:/etc/trino
+      - ./trino/catalog:/etc/trino/catalog
+    networks:
+      - analytics-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "trino --server localhost:8080 --execute 'SELECT 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
+  mongodb_data:
+  minio_data:
+
+networks:
+  analytics-network:
+    driver: bridge
